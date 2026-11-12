@@ -97,6 +97,9 @@ def run_audio_turn(
 
     text = transcript
     if text is None:
+        language, initial_prompt, hotwords = _stt_hints(
+            store, language, initial_prompt, hotwords, whisper_model
+        )
         text, status, reason = transcribe(
             wav,
             ears,
@@ -303,6 +306,44 @@ def _post_speech(base_url: str, text: str, *, language: str = "") -> bytes:
     if not audio:
         raise RuntimeError("empty audio")
     return audio
+
+
+# Seed words for first-class slots. Whisper ``base`` heard "My dog is
+# Pixel." as "My door is pixel." until "dog" was in the hotwords.
+# "chien" similarly steadies "s'appelle mon chien".
+_STT_SEED = "dog chien"
+
+
+def _stt_hints(
+    store: MemoryStore,
+    language: str,
+    initial_prompt: str,
+    hotwords: str,
+    whisper_model: str,
+) -> tuple[str, str, str]:
+    """Fill a language preference, seed hotwords, and a short name prompt.
+
+    A name prompt helped Whisper ``base`` hear Léa and Biscuit. The same
+    prompt made ``tiny`` emit garbage on one English question, so it is
+    only added when the model is not tiny. Seed hotwords are always
+    merged; they fixed "dog" vs "door" on the first turn, before any
+    name is stored.
+    """
+    from hyper_ambient_maxi.ears.local_speech import whisper_model_name
+
+    names = hotwords_for(store, f"{_STT_SEED} {hotwords}")
+    if not language.strip():
+        for key in ("fact:language", "fact:preferred-language"):
+            fact = store.slot(key)
+            if fact is not None and str(fact.value).strip():
+                language = str(fact.value).strip()
+                break
+    if not initial_prompt.strip() and names:
+        model = (whisper_model or whisper_model_name()).strip() or whisper_model_name()
+        if model.lower() != "tiny":
+            initial_prompt = ". ".join(names.split()) + "."
+    hotwords = names or hotwords
+    return language, initial_prompt, hotwords
 
 def _reply_language(user_text: str, reply: str, store: MemoryStore, configured: str = "") -> str:
     """Prefer the reply's language, then the user's turn, then a stored preference."""

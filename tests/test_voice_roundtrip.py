@@ -43,7 +43,7 @@ def test_voice_loop_round_trip_and_latency(tmp_path):
 
     store = MemoryStore(tmp_path / "home")
     brain = ScriptedBrain()
-    heard_en, en_stt = _heard(en_wav)
+    heard_en, en_stt = _heard(en_wav, language="en")
     saved = run_audio_turn(
         store,
         brain,
@@ -60,7 +60,7 @@ def test_voice_loop_round_trip_and_latency(tmp_path):
     assert saved.audio and saved.audio[:4] == b"RIFF"
     assert _close(heard_en, "My dog is Pixel.") or _close(_last_word(heard_en), "Pixel")
 
-    heard_fr, fr_stt = _heard(fr_wav)
+    heard_fr, fr_stt = _heard(fr_wav, language="fr")
     renamed = run_audio_turn(
         store,
         brain,
@@ -144,10 +144,10 @@ def _spoken(text: str) -> tuple[bytes, float]:
     return audio, warm
 
 
-def _heard(wav: bytes) -> tuple[str, float]:
-    recognize(wav)
+def _heard(wav: bytes, language: str = "") -> tuple[str, float]:
+    recognize(wav, language=language)
     started = time.perf_counter()
-    text, status, reason = recognize(wav)
+    text, status, reason = recognize(wav, language=language)
     elapsed = time.perf_counter() - started
     assert status == "ok" and text, reason
     return text, elapsed

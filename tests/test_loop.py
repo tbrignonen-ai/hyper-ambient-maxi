@@ -413,6 +413,8 @@ def test_the_user_is_not_addressed_as_maxi(monkeypatch, tmp_path):
     assert prompt.startswith("You are Maxi")
     assert "The user is Thomas" in prompt
     assert "Never call the user Maxi" in prompt
+    assert "No emoji" in prompt
+    assert "do not say it is missing" in system_prompt("Ada")
     assert "The user is Ada" in system_prompt("Ada")
     untitled = system_prompt("")
     assert "The user is Thomas" not in untitled
@@ -422,6 +424,9 @@ def test_the_user_is_not_addressed_as_maxi(monkeypatch, tmp_path):
     assert clean_reply("Hi Maxi, your dog is Biscuit.") == "Hi, your dog is Biscuit."
     assert clean_reply("Hello Maxi. He is well.") == "Hello. He is well."
     assert clean_reply("I am Maxi. Your dog is Biscuit.") == "I am Maxi. Your dog is Biscuit."
+    assert clean_reply("Your dog is **Biscuit**.") == "Your dog is Biscuit."
+    assert clean_reply("Hello 😊 Your dog is Biscuit.") == "Hello Your dog is Biscuit."
+    assert clean_reply("`Biscuit` is the name.") == "Biscuit is the name."
 
     bodies = []
 

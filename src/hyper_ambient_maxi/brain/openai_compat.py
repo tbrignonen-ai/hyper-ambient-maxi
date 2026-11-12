@@ -93,9 +93,10 @@ def system_prompt(user_name: str = "") -> str:
         "You are Maxi, a local voice companion. "
         + who
         + (
-            "Speak in one to three short sentences. Plain words. No lists. No markdown.\n"
+            "Speak in one to three short sentences. Plain words. No lists. No markdown. No emoji.\n"
             "Use only the memory block for facts about the user's life. "
-            "If a fact is not in that block, say you do not have it stored.\n"
+            "If a fact is not in that block, say you do not have it stored. "
+            "If the block or an earlier-values note has the answer, do not say it is missing.\n"
             "The harness saves memories itself. Say that something was saved "
             "only when the harness note says so.\n"
             "Never mention importance, relevance, or recency. There are no scores.\n"
@@ -283,6 +284,7 @@ def clean_reply(text: str, max_sentences: int = 3) -> str:
     """
     cleaned = _THINK.sub("", text or "")
     cleaned = _THINK_TAG.sub("", cleaned)
+    cleaned = _strip_markup(cleaned)
     cleaned = _LEADING_ROLE.sub("", cleaned).strip()
     cleaned = _drop_user_maxi(cleaned)
     match = _CONTINUATION.search(cleaned)
@@ -301,6 +303,38 @@ def _user_name(memories: list, receipt: Receipt) -> str:
         if getattr(fact, "key", "") == "fact:user-name" and str(fact.value).strip():
             return str(fact.value).strip()
     return ""
+
+
+_EMOJI = re.compile(
+    "["
+    "\U0001F300-\U0001F5FF"
+    "\U0001F600-\U0001F64F"
+    "\U0001F680-\U0001F6FF"
+    "\U0001F700-\U0001F77F"
+    "\U0001F780-\U0001F7FF"
+    "\U0001F800-\U0001F8FF"
+    "\U0001F900-\U0001F9FF"
+    "\U0001FA00-\U0001FAFF"
+    "\U00002600-\U000026FF"
+    "\U00002700-\U000027BF"
+    "\U0000FE00-\U0000FE0F"
+    "\U0001F1E6-\U0001F1FF"
+    "]+"
+)
+_BOLD = re.compile(r"\*{1,3}([^*]+)\*{1,3}")
+_ITALIC = re.compile(r"(?<![A-Za-z0-9])_([^_]+)_(?![A-Za-z0-9])")
+_CODE = re.compile(r"`+([^`]+)`+")
+_HEADING = re.compile(r"(?m)^#+\s*")
+
+
+def _strip_markup(text: str) -> str:
+    """Drop markdown and emoji so Piper does not read them aloud."""
+    cleaned = _CODE.sub(r"\1", text or "")
+    cleaned = _BOLD.sub(r"\1", cleaned)
+    cleaned = _ITALIC.sub(r"\1", cleaned)
+    cleaned = _HEADING.sub("", cleaned)
+    cleaned = _EMOJI.sub("", cleaned)
+    return cleaned
 
 
 def _drop_user_maxi(text: str) -> str:

@@ -83,7 +83,19 @@ def voice_cache() -> Path:
 
 
 def whisper_model_name() -> str:
-    return os.environ.get("HAM_WHISPER_MODEL", "tiny").strip() or "tiny"
+    """``base`` when it is already cached, otherwise ``tiny``.
+
+    ``--download-models`` fetches ``base``. On this box tiny was faster
+    (~0.27 s) but missed unaccented French ("s'appelle") and some names.
+    ``base`` with a language hint and a short name prompt was ~0.55 s
+    and kept those words. ``HAM_WHISPER_MODEL`` still wins when set.
+    """
+    override = os.environ.get("HAM_WHISPER_MODEL", "").strip()
+    if override:
+        return override
+    if _whisper_snapshot("base") is not None:
+        return "base"
+    return "tiny"
 
 
 def faster_whisper_ready() -> bool:
