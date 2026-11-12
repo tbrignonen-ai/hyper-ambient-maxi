@@ -1,0 +1,38 @@
+Hyper Ambient Maxi
+Copyright 2026 Hyper Ambient Maxi contributors
+
+This product includes code adapted from hyper-ambient-mini
+(https://github.com/tbrignonen-ai/hyper-ambient-mini), licensed under
+the Apache License, Version 2.0. The adapted pieces are the 16 kHz WAV
+framing helpers, the int16 energy measurement, and the junk-transcript
+filter in src/hyper_ambient_maxi/ears/wavutil.py, taken from
+app/mini_harness.py. See that file's header.
+
+hyper-ambient (https://github.com/tbrignonen-ai/hyper-ambient) was
+studied for its ears / turn / brain / mouth split and for the idea that
+a local llama-server and a remote chat model share one OpenAI-compatible
+client. That repository has no LICENSE file, so none of its source is
+copied here.
+
+Portions of the salience ranking, the constraint-conflict warning, the
+continuity router, the lexical overlap (including its Damerau-Levenshtein
+fallback), and the MCP tool names friend_context / friend_remember are
+adapted from AI Friend 1.8.3, "the friend who remembers". The Origin
+clone returned HTTP 403; the 1.8.3 tree used here is the attached
+release archive, whose LICENSE file is the MIT License. That work is:
+
+    Copyright 2026 AI Friend contributors
+    Licensed under the MIT License.
+
+The adapted modules are src/hyper_ambient_maxi/memory/textutil.py,
+salience.py, initiative.py, router.py, and the tool schema in
+mcp_server.py. Scores from the 1.8.3 context formatter are not rendered.
+The write-then-read-back journal is original to this project and stays
+under the Apache License, Version 2.0, as does the rest of the tree.
+The MIT notice above covers only those adapted portions. No AI Friend
+source files are vendored. Private install notes from that tree were
+not copied.
+
+LiquidAI LFM3-Audio-2B weights are not included. Those weights are
+under the LFM Open License v1.0 and stay on the machine that already
+has them.

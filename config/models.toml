@@ -1,0 +1,180 @@
+# Model card for Hyper Ambient Maxi.
+# The default profile is what this repository's tests run.
+# Profiles marked NOT_RUN need a GPU, a microphone, or weights that are
+# not on the machine that ran the tests. Do not treat them as verified.
+
+default_profile = "text"
+
+[profiles.text]
+description = """
+Deterministic steward and scripted brain. Text in, text out.
+No audio device, no GPU, no weights. This is the verified profile.
+"""
+ears = "text"
+brain = "scripted"
+mouth = "text"
+requires_gpu = false
+requires_audio_hardware = false
+run_status = "verified"
+
+[profiles.text.brain_settings]
+kind = "scripted"
+
+[profiles.llama-local]
+description = """
+Text conversation against llama.cpp llama-server (or `llama serve`).
+Point brain_settings.model at whichever GGUF is loaded. The five files
+under known_models.brains are the ones already on Thomas's machine.
+If the server is down, the turn still saves memory and the reply falls
+back to the scripted brain. That fallback is marked in the turn log.
+"""
+ears = "text"
+brain = "openai-compat"
+mouth = "text"
+requires_gpu = true
+requires_audio_hardware = false
+run_status = "NOT_RUN"
+
+[profiles.llama-local.brain_settings]
+base_url = "http://127.0.0.1:8080/v1"
+model = "lfm2.5-8b-a1b"
+timeout_s = 120
+# Speak budget. A reasoning model that still thinks needs more, or
+# llama-server --reasoning off. See docs/windows-4070.md.
+max_tokens = 512
+# First request disables thinking. Set true only to spend the turn on a chain of thought.
+think = false
+# Spoken replies keep the first answer, at most this many sentences.
+max_sentences = 3
+
+[profiles.thomas-4070]
+description = """
+RTX 4070 voice profile. Brain is a GGUF on llama-server (default
+LFM2.5-8B-A1B, the friend-scale local model). Ears and mouth are
+OpenAI-compatible HTTP, so a faster-whisper server, Hyper Ambient
+Mini's parakeet on :8077, Piper, or Magpie can sit behind the URLs.
+This VM has no GPU and no microphone, so the profile is NOT_RUN.
+"""
+ears = "http-stt"
+brain = "openai-compat"
+mouth = "http-tts"
+requires_gpu = true
+requires_audio_hardware = true
+run_status = "NOT_RUN"
+
+[profiles.thomas-4070.brain_settings]
+base_url = "http://127.0.0.1:8080/v1"
+model = "lfm2.5-8b-a1b"
+timeout_s = 120
+max_tokens = 512
+think = false
+max_sentences = 3
+
+[profiles.thomas-4070.ears_settings]
+base_url = "http://127.0.0.1:8077"
+# POST {base_url}/v1/audio/transcriptions  (multipart file, field "file")
+# python -m hyper_ambient_maxi --serve-ears  (faster-whisper, no LFM3)
+# base on the 4070. --serve-ears uses CUDA when a device is present, else CPU.
+model = "base"
+device = "cuda"
+# Static hints. The turn also adds the dog's name and people from memory.
+hotwords = "Thomas"
+
+[profiles.thomas-4070.mouth_settings]
+base_url = "http://127.0.0.1:8078"
+# POST {base_url}/v1/audio/speech  JSON {"input": "...", "voice": "female"}
+# python -m hyper_ambient_maxi --serve-mouth  (Piper WAV bytes back)
+
+[profiles.lfm3-audio]
+description = """
+LiquidAI/LFM3-Audio-2B, the BF16 checkpoint Thomas already has on the
+RTX 4070. Evaluated from the public model card (2026-11), not executed
+here. Speech in at 16 kHz; text, 24 kHz speech, or both out. Multilingual
+transcription, synthesis, and translation across 18 languages (19
+locales, en-GB and en-US counted once). The card says voice chat itself
+is English-only today, and that the 2B model is a poor fit for multi-step
+reasoning. Maxi therefore does not let it own memory. A transcript is
+committed by the steward in this process; the spoken reply is optional.
+Weights are LFM Open License v1.0 and are not in this repo.
+A GGUF sibling exists (LiquidAI/LFM3-Audio-2B-GGUF) for llama.cpp
+b11960 / v0.8.0+: `llama serve` exposes /v1/realtime, and llama-tts
+synthesises. That path is also NOT_RUN here.
+"""
+ears = "lfm3-audio"
+brain = "openai-compat"
+mouth = "lfm3-audio"
+requires_gpu = true
+requires_audio_hardware = true
+run_status = "NOT_RUN"
+
+[profiles.lfm3-audio.brain_settings]
+base_url = "http://127.0.0.1:8080/v1"
+model = "lfm2.5-8b-a1b"
+timeout_s = 120
+max_tokens = 512
+think = false
+max_sentences = 3
+
+[profiles.lfm3-audio.speech]
+model_id = "LiquidAI/LFM3-Audio-2B"
+dtype = "bfloat16"
+input_hz = 16000
+output_hz = 24000
+languages = 18
+license = "LFM Open License v1.0"
+voice_chat = "english-only on the model card"
+asr_tts = "18 languages"
+
+[profiles.lfm3-audio.ears_settings]
+# Leave empty until a local wrapper exposes transcriptions.
+# The BF16 Transformers path is in-process and was not run.
+base_url = ""
+
+[profiles.lfm3-audio.mouth_settings]
+base_url = ""
+
+# Files Thomas already runs under llama.cpp llama-server.
+# Names are the quantisation he named. TwIL also appears as
+# TwIL-8B-Q4_K_M-balanced.gguf in the AI Friend 2 launch notes.
+# None of these files are fetched by this repository.
+
+[known_models.brains.twil-8b]
+file = "TwIL-8B-Q4_K_M.gguf"
+also = "TwIL-8B-Q4_K_M-balanced.gguf"
+runtime = "llama-server"
+alias = "twil-8b"
+notes = "Brain used for the AI Friend harness turns."
+
+[known_models.brains.lfm3-1-7b]
+file = "LFM3-1.7B-Q4_K_M.gguf"
+runtime = "llama-server"
+alias = "lfm3-1.7b"
+notes = "Small text model. Not LFM3-Audio."
+
+[known_models.brains.lfm2-5-8b-a1b]
+file = "LFM2.5-8B-A1B-Q4_K_M.gguf"
+runtime = "llama-server"
+alias = "lfm2.5-8b-a1b"
+notes = "Default friend brain. Same family as the 1.8.3 Linux check."
+
+[known_models.brains.nemotron-3-5-bolt]
+file = "Nemotron-3.5-Bolt-E4B-Q4_K_XL.gguf"
+runtime = "llama-server"
+alias = "nemotron-3.5-bolt"
+notes = "NVIDIA Nemotron 3.5 Bolt E4B, Q4_K_XL."
+
+[known_models.brains.vllm-d3-flash]
+file = "vllm-d3-flash-Q4_K_M.gguf"
+runtime = "llama-server"
+alias = "vllm-d3-flash"
+notes = "AI Friend 2 used this as a decision model. Maxi does not let a decision score authorize a memory write."
+
+[known_models.speech.lfm3-audio-2b]
+model_id = "LiquidAI/LFM3-Audio-2B"
+file_note = "BF16 weights already on the RTX 4070; not downloaded here"
+dtype = "bfloat16"
+runtime = "transformers or llama.cpp GGUF (separate repo LFM3-Audio-2B-GGUF)"
+io = "speech or text in; text, speech, or both out"
+languages = 18
+run_status = "NOT_RUN"
+license = "LFM Open License v1.0"

@@ -1,0 +1,356 @@
+"""One chat client for a local llama-server and any OpenAI-compatible URL.
+
+Hyper Ambient uses the same split: ``llama-server`` speaks
+``/v1/chat/completions``, so the local GGUF and a remote model are a
+config change. This file is a new client. hyper-ambient's
+``src/brain/openai_compat.py`` was not copied; that repository has no
+license file.
+
+A reasoning model on llama-server (LFM3-1.7B with the default template)
+fills ``reasoning_content`` and leaves ``content`` empty, or wraps the
+reply in ``<think>``. This client never speaks ``reasoning_content``.
+An empty ``content`` is retried once with a larger token budget and
+thinking disabled. Voice and llama-local profiles send that disable on
+the first request (``think = false``), so the retry is the rare path.
+The API key, if any, is an Authorization header and
+is never written into the body or the memory journal.
+
+``HAM_BRAIN_BASE_URL`` overrides the profile URL. ``--brain-url`` does
+the same for one process.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import urllib.error
+import urllib.request
+
+from hyper_ambient_maxi.memory.store import Fact, Receipt
+
+_STOPS = [
+    "\nUser:",
+    "\nuser:",
+    "\nHuman:",
+    "\nAssistant:",
+    "<|user|>",
+    "<|im_start|>",
+]
+_THINK = re.compile(r"(?is)<think>.*?</think>")
+_THINK_TAG = re.compile(r"(?i)</?think>")
+_LEADING_ROLE = re.compile(r"(?i)^\s*(?:assistant|user|human)\s*:\s*")
+_CONTINUATION = re.compile(
+    r"(?i)\n\s*(?:user|human|assistant)\s*:|<\|\s*(?:user|im_start)"
+)
+# A second answer glued on with no space: "involves.That’s".
+# The letter before the punctuation keeps "U.S.Army" and "3.14" intact.
+_GLUED = re.compile(r"[a-zà-ÿ][.!?](?=[A-ZÀ-Ý])")
+_ABBREV = {
+    "mr",
+    "mrs",
+    "ms",
+    "dr",
+    "st",
+    "vs",
+    "etc",
+    "prof",
+    "jr",
+    "sr",
+}
+_ABBREV_TAIL = re.compile(r"(?i)(?:^|[^A-Za-z])(?:e\.g|i\.e|u\.s|u\.k)$")
+# A later sentence that is a fresh greeting or a stock congratulations,
+# not the first sentence of the reply.
+_RESTART = re.compile(
+    r"(?ix)^['«\s]*"
+    r"(?:hello|hi|hey|hi\ there|good\ morning|good\ afternoon|good\ evening"
+    r"|salut|bonjour|bonsoir|coucou"
+    r"|that['’]s\ (?:awesome|great|wonderful|amazing|fantastic)"
+    r"|congrats|congratulations|félicitations|felicitations|bravo"
+    r"|(?:awesome|great|wonderful|amazing)\ news"
+    r"|c['’]est\ super"
+    r"|well\ done|nice\ one)\b"
+)
+
+_ADDRESS = re.compile(
+    r"(?i)^(hi|hello|hey|hi there|salut|bonjour|bonsoir|coucou)"
+    r"(?:\s*,)?\s+maxi\b([,.!])?"
+)
+
+
+def system_prompt(user_name: str = "Thomas") -> str:
+    """Maxi is the companion. The name slot is the user, otherwise Thomas."""
+    name = " ".join((user_name or "").split()) or "Thomas"
+    return (
+        "You are Maxi, a local voice companion. "
+        f"The user is {name}. You are not the user. Never call the user Maxi.\n"
+        "Speak in one to three short sentences. Plain words. No lists. No markdown.\n"
+        "Use only the memory block for facts about the user's life. "
+        "If a fact is not in that block, say you do not have it stored.\n"
+        "The harness saves memories itself. Say that something was saved "
+        "only when the harness note says so.\n"
+        "Never mention importance, relevance, or recency. There are no scores.\n"
+        "Pets, family, and jobs belong to the user, not to you."
+    )
+
+
+class OpenAICompatBrain:
+    name = "openai-compat"
+
+    def __init__(
+        self,
+        base_url: str = "http://127.0.0.1:8080/v1",
+        model: str = "local",
+        api_key: str | None = None,
+        timeout_s: float = 120.0,
+        max_tokens: int = 512,
+        think: bool = False,
+        max_sentences: int = 3,
+    ):
+        self.base_url = resolve_base_url(base_url)
+        self.model = model
+        self.api_key = api_key if api_key is not None else os.environ.get(
+            "HAM_BRAIN_API_KEY", ""
+        )
+        self.timeout_s = timeout_s
+        self.max_tokens = max_tokens
+        self.think = think
+        self.max_sentences = max_sentences
+
+    def health(self) -> dict:
+        try:
+            payload = self._get("/models")
+        except Exception as exc:  # network, HTTP, JSON
+            return {"ok": False, "detail": str(exc)}
+        return {"ok": True, "detail": "models", "raw_keys": list(payload)[:4]}
+
+    def reply(
+        self,
+        user: str,
+        context: str,
+        receipt: Receipt,
+        memories: list[Fact],
+        notes: list[str] | None = None,
+        warning: str | None = None,
+        **extra,
+    ) -> str:
+        del notes
+        if warning:
+            user = user + "\n\nWorth raising, say this plainly: " + warning
+        called = str(extra.get("user_name") or "").strip() or _user_name(memories, receipt)
+        system = system_prompt(called)
+        if context:
+            system += "\n\n" + context
+        else:
+            system += "\n\nNo stored memories were selected for this turn."
+        if receipt.facts:
+            saved = "; ".join(fact.summary for fact in receipt.facts)
+            system += "\n\nThe harness already saved: " + saved
+        elif receipt.stored == 0:
+            system += "\n\nThe harness did not save a new fact on this turn."
+        payload = self._post(
+            "/chat/completions",
+            self._body(system, user, self.max_tokens, disable_thinking=not self.think),
+        )
+        text = speakable_text(payload, max_sentences=self.max_sentences)
+        if text:
+            return text
+        # Empty content is not a license to read reasoning_content. One
+        # retry spends the budget on the reply and asks the template to
+        # stop thinking. A second empty content falls through to the
+        # scripted brain instead of voicing the chain of thought.
+        retry_tokens = min(4096, max(self.max_tokens * 4, 1024))
+        try:
+            payload = self._post(
+                "/chat/completions",
+                self._body(system, user, retry_tokens, disable_thinking=True),
+            )
+        except Exception as exc:
+            raise RuntimeError("model returned no speakable content") from exc
+        text = speakable_text(payload, max_sentences=self.max_sentences)
+        if not text:
+            raise RuntimeError("model returned no speakable content")
+        return text
+
+    def _body(self, system: str, user: str, max_tokens: int, *, disable_thinking: bool) -> dict:
+        body = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            "max_tokens": max_tokens,
+            "temperature": 0.4,
+            "stop": list(_STOPS),
+        }
+        if disable_thinking:
+            body["chat_template_kwargs"] = {"enable_thinking": False}
+            body["reasoning_effort"] = "none"
+        return body
+
+    def _headers(self) -> dict[str, str]:
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        return headers
+
+    def _get(self, path: str) -> dict:
+        request = urllib.request.Request(
+            self.base_url + path,
+            headers=self._headers(),
+            method="GET",
+        )
+        return self._read(request)
+
+    def _post(self, path: str, body: dict) -> dict:
+        if "api_key" in body or "authorization" in body:
+            raise RuntimeError("refusing to put a credential in the request body")
+        data = json.dumps(body).encode("utf-8")
+        request = urllib.request.Request(
+            self.base_url + path,
+            data=data,
+            headers=self._headers(),
+            method="POST",
+        )
+        return self._read(request)
+
+    def _read(self, request: urllib.request.Request) -> dict:
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout_s) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")[:300]
+            raise RuntimeError(f"HTTP {exc.code}: {detail}") from exc
+
+
+def resolve_base_url(profile_url: str) -> str:
+    """CLI and ``HAM_BRAIN_BASE_URL`` win over the profile URL."""
+    override = os.environ.get("HAM_BRAIN_BASE_URL", "").strip()
+    chosen = override or (profile_url or "http://127.0.0.1:8080/v1")
+    return chosen.rstrip("/")
+
+
+def speakable_text(payload: dict, max_sentences: int = 3) -> str:
+    """The words to say. ``reasoning_content`` is ignored on purpose."""
+    try:
+        message = payload["choices"][0]["message"]
+    except (KeyError, IndexError, TypeError):
+        return ""
+    raw = message.get("content") if isinstance(message, dict) else ""
+    if isinstance(raw, list):
+        raw = " ".join(
+            str(part.get("text") or "")
+            for part in raw
+            if isinstance(part, dict)
+        )
+    if not isinstance(raw, str):
+        raw = ""
+    return clean_reply(raw, max_sentences=max_sentences)
+
+
+def clean_reply(text: str, max_sentences: int = 3) -> str:
+    """Drop think tags, a hallucinated next turn, and a second glued answer.
+
+    Voice replies stay within ``max_sentences`` (default 3). A second
+    answer stuck to the punctuation, as in ``involves.That’s``, is cut.
+    So is a later greeting or a stock congratulations. The first
+    sentence is kept even when it is itself a greeting.
+    """
+    cleaned = _THINK.sub("", text or "")
+    cleaned = _THINK_TAG.sub("", cleaned)
+    cleaned = _LEADING_ROLE.sub("", cleaned).strip()
+    cleaned = _drop_user_maxi(cleaned)
+    match = _CONTINUATION.search(cleaned)
+    if match is not None:
+        cleaned = cleaned[: match.start()]
+    cleaned = _drop_second_answer(cleaned)
+    if max_sentences > 0:
+        cleaned = " ".join(_split_sentences(cleaned)[:max_sentences])
+    return " ".join(cleaned.split())
+
+
+def _user_name(memories: list, receipt: Receipt) -> str:
+    """The name slot, from this turn's write or the recalled facts."""
+    found = list(getattr(receipt, "facts", None) or []) + list(memories or [])
+    for fact in found:
+        if getattr(fact, "key", "") == "fact:user-name" and str(fact.value).strip():
+            return str(fact.value).strip()
+    return "Thomas"
+
+
+def _drop_user_maxi(text: str) -> str:
+    """A leading "Hi Maxi" is the model addressing the user as itself."""
+    match = _ADDRESS.match(text)
+    if match is None:
+        return text
+    greeting = match.group(1)
+    punct = match.group(2) or ""
+    rest = text[match.end() :].lstrip()
+    if not rest:
+        return greeting
+    if punct == ",":
+        return f"{greeting}, {rest}"
+    if punct:
+        return f"{greeting}{punct} {rest}"
+    return f"{greeting} {rest}"
+
+
+def _drop_second_answer(text: str) -> str:
+    text = _cut_glued(text)
+    sentences = _split_sentences(text)
+    if not sentences:
+        return ""
+    kept = [sentences[0]]
+    for sentence in sentences[1:]:
+        if _RESTART.match(sentence):
+            break
+        kept.append(sentence)
+    return " ".join(kept)
+
+
+def _cut_glued(text: str) -> str:
+    """Keep the first answer when the next one starts with no space."""
+    for match in _GLUED.finditer(text):
+        punct = match.start() + 1
+        if _is_abbrev(text, punct):
+            continue
+        return text[: punct + 1]
+    return text
+
+
+def _is_abbrev(text: str, punct: int) -> bool:
+    prefix = text[:punct]
+    if _ABBREV_TAIL.search(prefix):
+        return True
+    word = re.search(r"([A-Za-z]+)$", prefix)
+    return bool(word and word.group(1).lower() in _ABBREV)
+
+
+def _split_sentences(text: str) -> list[str]:
+    sentences: list[str] = []
+    start = 0
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if char in ".!?" and index > 0 and text[index - 1].islower():
+            if char == "." and _is_abbrev(text, index):
+                index += 1
+                continue
+            nxt = text[index + 1] if index + 1 < len(text) else ""
+            if nxt and not nxt.isspace() and not nxt.isupper():
+                index += 1
+                continue
+            end = index + 1
+            while end < len(text) and text[end] in ".!?":
+                end += 1
+            piece = text[start:end].strip()
+            if piece:
+                sentences.append(piece)
+            start = end
+            index = end
+            continue
+        index += 1
+    tail = text[start:].strip()
+    if tail:
+        sentences.append(tail)
+    return sentences
