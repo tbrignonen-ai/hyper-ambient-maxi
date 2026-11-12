@@ -587,6 +587,15 @@ def test_polish_reply_rewrites_got_it_and_drops_echo_and_hedge():
     )
     assert hedged == "The previous name was Pixel but now it is Biscuit."
     assert "do not have" not in hedged.lower()
+    # A question read back is also an echo.
+    asked = polish_reply(
+        "What did I use to call your dog?",
+        "What did I used to call my dog?",
+        notes=["Pixel"],
+        context="<memory>\nEarlier values:\n- The dog was previously called Pixel\n</memory>",
+    )
+    assert asked == "That was previously Pixel."
+    assert "what did i" not in asked.lower()
     # A genuine miss, with no memory, is left alone.
     assert polish_reply("I do not have that stored.", "What is my postal code?") == (
         "I do not have that stored."

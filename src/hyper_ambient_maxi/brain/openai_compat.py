@@ -344,7 +344,7 @@ def polish_reply(
     cleaned = " ".join(cleaned.split())
     if cleaned:
         return cleaned
-    return _fallback_ack(user, receipt, memories)
+    return _fallback_ack(user, receipt, memories, notes)
 
 
 def _rewrite_acks(text: str) -> str:
@@ -395,7 +395,30 @@ def _is_echo(user: str, reply: str) -> bool:
         return True
     if len(left) >= 4 and right[: len(left)] == left:
         return True
+    # A question read back with only pronoun or tense changes
+    # ("What did I use to call your dog?").
+    if _question_shape(reply) and len(left) >= 5:
+        a, b = _content(left), _content(right)
+        if a and b and len(a & b) / len(a | b) >= 0.75:
+            return True
     return False
+
+
+def _question_shape(text: str) -> bool:
+    stripped = (text or "").strip()
+    if "?" in stripped:
+        return True
+    return bool(re.match(r"(?i)^(what|where|who|when|why|how|do|did|can|could|comment|où|pourquoi)\b", stripped))
+
+
+def _content(words: list[str]) -> set[str]:
+    skip = {"my", "your", "his", "her", "our", "the", "a", "an", "i", "you", "to"}
+    found: set[str] = set()
+    for word in words:
+        if word in skip:
+            continue
+        found.add("use" if word in {"use", "used"} else word)
+    return found
 
 
 def _words(text: str) -> list[str]:
@@ -413,8 +436,14 @@ def _drop_trailing_okay(text: str) -> str:
     return text
 
 
-def _fallback_ack(user: str, receipt: Receipt | None, memories=None) -> str:
+def _fallback_ack(user: str, receipt: Receipt | None, memories=None, notes=None) -> str:
     french = _looks_french(user)
+    prior = [str(note).strip() for note in (notes or []) if str(note).strip()]
+    if prior and _question_shape(user):
+        value = prior[-1]
+        if french:
+            return f"Avant, c'était {value}."
+        return f"That was previously {value}."
     facts = list(getattr(receipt, "facts", None) or []) or list(memories or [])
     if facts:
         summaries = "; ".join(
