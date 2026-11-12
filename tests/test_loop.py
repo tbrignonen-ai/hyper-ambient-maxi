@@ -227,10 +227,14 @@ def test_openai_client_never_speaks_reasoning_and_keeps_the_key_out(monkeypatch)
     assert len(bodies) == 2
     assert bodies[0]["max_tokens"] == 200
     assert bodies[0]["chat_template_kwargs"]["enable_thinking"] is False
+    assert bodies[0]["chat_template_kwargs"]["thinking"] is False
     assert bodies[0]["reasoning_effort"] == "none"
+    assert bodies[0]["think"] is False
+    assert bodies[0]["reasoning_budget"] == 0
     assert bodies[1]["max_tokens"] >= 800
     assert bodies[1]["chat_template_kwargs"]["enable_thinking"] is False
     assert bodies[1]["reasoning_effort"] == "none"
+    assert bodies[1]["think"] is False
     assert "\nUser:" in bodies[0]["stop"]
     assert clean_reply("Hello</think> there") == "Hello there"
 
@@ -268,6 +272,8 @@ def test_llama_local_disables_thinking_on_the_first_request(monkeypatch):
     assert text == "Your dog's name is Biscuit."
     assert len(bodies) == 1
     assert bodies[0]["chat_template_kwargs"]["enable_thinking"] is False
+    assert bodies[0]["think"] is False
+    assert bodies[0]["reasoning_budget"] == 0
     assert bodies[0]["reasoning_effort"] == "none"
 
 
@@ -408,6 +414,10 @@ def test_the_user_is_not_addressed_as_maxi(monkeypatch, tmp_path):
     assert "The user is Thomas" in prompt
     assert "Never call the user Maxi" in prompt
     assert "The user is Ada" in system_prompt("Ada")
+    untitled = system_prompt("")
+    assert "The user is Thomas" not in untitled
+    assert "name is not stored yet" in untitled
+    assert "do not call them Thomas" in untitled
     assert clean_reply("Hi Maxi") == "Hi"
     assert clean_reply("Hi Maxi, your dog is Biscuit.") == "Hi, your dog is Biscuit."
     assert clean_reply("Hello Maxi. He is well.") == "Hello. He is well."
@@ -442,3 +452,78 @@ def test_the_user_is_not_addressed_as_maxi(monkeypatch, tmp_path):
     assert "The user is Ada" in system
     assert "Never call the user Maxi" in system
     assert brain.reply("Hello", "", Receipt(0, True), [], user_name="Thomas").startswith("Hi")
+
+
+def test_sister_name_is_stored_and_recalled(tmp_path):
+    store = MemoryStore(tmp_path)
+    saved = _turn(store, "My sister is called Léa.")
+    assert saved.memory_ok
+    assert store.slot("person:sister").value == "Léa"
+    asked = _turn(store, "What's my sister's name?")
+    assert asked.reply == "Your sister is called Léa."
+
+
+def test_openai_brain_sees_superseded_dog_name(monkeypatch, tmp_path):
+    import urllib.request
+
+    from hyper_ambient_maxi.brain.openai_compat import OpenAICompatBrain
+
+    bodies = []
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return json.dumps(
+                {"choices": [{"message": {"content": "You used to call your dog Pixel."}}]}
+            ).encode()
+
+    def fake_urlopen(request, timeout=0):
+        bodies.append(json.loads(request.data.decode()))
+        return Response()
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    store = MemoryStore(tmp_path)
+    _turn(store, "My dog is called Pixel.")
+    _turn(store, "I renamed him to Biscuit.")
+    brain = OpenAICompatBrain(base_url="http://127.0.0.1:9/v1", model="local")
+    result = run_turn(store, brain, "What did I used to call my dog?")
+    assert result.reply == "You used to call your dog Pixel."
+    system = bodies[0]["messages"][0]["content"]
+    assert "previously called Pixel" in system
+    assert "Pixel" in system
+    assert "Biscuit" in system
+
+
+def test_default_prompt_does_not_name_the_user_thomas(tmp_path, monkeypatch):
+    import urllib.request
+
+    from hyper_ambient_maxi.brain.openai_compat import OpenAICompatBrain
+
+    bodies = []
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return json.dumps({"choices": [{"message": {"content": "Hello."}}]}).encode()
+
+    def fake_urlopen(request, timeout=0):
+        bodies.append(json.loads(request.data.decode()))
+        return Response()
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    store = MemoryStore(tmp_path)
+    brain = OpenAICompatBrain(base_url="http://127.0.0.1:9/v1", model="local")
+    run_turn(store, brain, "Hello")
+    system = bodies[0]["messages"][0]["content"]
+    assert "The user is Thomas" not in system
+    assert "name is not stored yet" in system

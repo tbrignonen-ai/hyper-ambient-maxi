@@ -121,7 +121,12 @@ def run_audio_turn(
         source_agent=source_agent,
     )
     turn.voice_status = "audio"
-    audio, speech_status, speech_reason = speak(turn.reply, mouth, mouth_url)
+    audio, speech_status, speech_reason = speak(
+        turn.reply,
+        mouth,
+        mouth_url,
+        language=_reply_language(text, turn.reply, store, language),
+    )
     # A missing speaker does not roll back a verified write. The caller
     # still has the text reply; the reason says the voice was NOT_RUN.
     if speech_status == "NOT_RUN":
@@ -180,7 +185,7 @@ def transcribe(
     return None, "NOT_RUN", f"NOT_RUN: unknown ears backend {backend}"
 
 
-def speak(text: str, backend: str, url: str) -> tuple[bytes | None, str, str]:
+def speak(text: str, backend: str, url: str, *, language: str = "") -> tuple[bytes | None, str, str]:
     if backend in {"text", "scripted", ""}:
         return None, "text", "text"
     if backend == "espeak":
@@ -194,7 +199,7 @@ def speak(text: str, backend: str, url: str) -> tuple[bytes | None, str, str]:
         if not url:
             return None, "NOT_RUN", "NOT_RUN: http-tts has no base_url"
         try:
-            return _post_speech(url, text), "ok", "http-tts"
+            return _post_speech(url, text, language=language), "ok", "http-tts"
         except Exception as exc:
             return None, "NOT_RUN", f"NOT_RUN: tts server unreachable ({exc})"
     if backend == "lfm3-audio":
@@ -202,7 +207,7 @@ def speak(text: str, backend: str, url: str) -> tuple[bytes | None, str, str]:
     if backend == "piper":
         from hyper_ambient_maxi.ears.local_speech import synthesize
 
-        return synthesize(text)
+        return synthesize(text, language=language)
     return None, "NOT_RUN", f"NOT_RUN: unknown mouth backend {backend}"
 
 
@@ -278,9 +283,12 @@ def _text_part(boundary: str, name: str, value: str) -> bytes:
     ).encode()
 
 
-def _post_speech(base_url: str, text: str) -> bytes:
+def _post_speech(base_url: str, text: str, *, language: str = "") -> bytes:
     url = base_url.rstrip("/") + "/v1/audio/speech"
-    body = json.dumps({"input": text, "voice": "female"}).encode("utf-8")
+    payload = {"input": text, "voice": "female"}
+    if language.strip():
+        payload["language"] = language.strip()
+    body = json.dumps(payload).encode("utf-8")
     request = urllib.request.Request(
         url,
         data=body,
@@ -295,3 +303,18 @@ def _post_speech(base_url: str, text: str) -> bytes:
     if not audio:
         raise RuntimeError("empty audio")
     return audio
+
+def _reply_language(user_text: str, reply: str, store: MemoryStore, configured: str = "") -> str:
+    """Prefer the reply's language, then the user's turn, then a stored preference."""
+    from hyper_ambient_maxi.ears.local_speech import speech_language
+
+    preferred = (configured or "").strip()
+    if not preferred:
+        for key in ("fact:language", "fact:preferred-language"):
+            fact = store.slot(key)
+            if fact is not None and str(fact.value).strip():
+                preferred = str(fact.value).strip()
+                break
+    if not preferred:
+        preferred = speech_language(user_text)
+    return speech_language(reply, preferred=preferred)

@@ -42,9 +42,36 @@ _WHISPER = None
 _WHISPER_NAME = ""
 _PIPER: dict[str, object] = {}
 
-_FRENCH = re.compile(
-    r"[àâçéèêëîïôùûüœ]|(?:\b(?:je|tu|il|elle|mon|ma|mes|renommé|renomme)\b)|l['’]ai",
-    re.I,
+# Accents and elisions are strong signals. Unaccented replies such as
+# "Votre chien s'appelle Biscuit" need function-word scores as well.
+_FR_CHAR = re.compile(r"[àâäçéèêëîïôùûüœæ]")
+_FR_ELISION = re.compile(
+    r"(?i)\b(?:[cdjlmnst]|qu|n|s)['’](?:\w|\b)",
+)
+_FR_WORDS = frozenset(
+    {
+        "alors", "appelle", "appelait", "après", "apres", "assez", "aussi",
+        "avant", "avec", "avoir", "bonjour", "bonsoir", "ça", "ca", "car",
+        "ceci", "cela", "cette", "ceux", "chez", "chien", "comment", "coucou",
+        "dans", "des", "donc", "du", "elle", "elles", "est", "et", "être",
+        "etre", "fait", "il", "ils", "je", "la", "le", "les", "leur", "leurs",
+        "ma", "mais", "maintenant", "me", "merci", "mes", "moi", "mon",
+        "ne", "nom", "nomme", "nommé", "non", "nos", "notre", "nous", "on",
+        "ont", "ou", "où", "oui", "par", "pas", "plus", "pour", "pourquoi",
+        "qu", "que", "qui", "rien", "sa", "sans", "salut", "se", "ses",
+        "si", "son", "sont", "suis", "sur", "ta", "te", "tes", "toi", "ton",
+        "toujours", "tous", "tout", "très", "tres", "tu", "un", "une",
+        "votre", "vous", "vos",
+    }
+)
+_EN_WORDS = frozenset(
+    {
+        "a", "about", "an", "and", "are", "as", "at", "be", "but", "called",
+        "can", "did", "do", "dog", "for", "from", "have", "how", "i", "if",
+        "in", "is", "it", "my", "name", "no", "not", "of", "on", "or",
+        "that", "the", "this", "to", "used", "was", "were", "what", "when",
+        "where", "who", "with", "you", "your",
+    }
 )
 
 
@@ -120,12 +147,12 @@ def speech_text(text: str) -> str:
     return unicodedata.normalize("NFC", text or "")
 
 
-def synthesize(text: str) -> tuple[bytes | None, str, str]:
+def synthesize(text: str, *, language: str = "") -> tuple[bytes | None, str, str]:
     status, reason = piper_status()
     if status != "ok":
         return None, status, reason
     spoken = speech_text(text)
-    voice = _piper_voice(_voice_key(spoken))
+    voice = _piper_voice(speech_language(spoken, preferred=language))
     if voice is None:
         return None, "NOT_RUN", reason
     buffer = io.BytesIO()
@@ -206,10 +233,57 @@ def recognize(
     return text, "ok", "faster-whisper"
 
 
-def _voice_key(text: str) -> str:
-    if _FRENCH.search(text or ""):
+def speech_language(text: str, *, preferred: str = "") -> str:
+    """Pick Piper's ``en`` or ``fr`` voice.
+
+    Accents and elisions count heavily. Unaccented French is scored from
+    function words. A preferred language (the user's turn, or a stored
+    preference) wins unless the text is clearly the other language.
+    """
+    spoken = speech_text(text)
+    want = _lang_code(preferred)
+    french, english = _language_scores(spoken)
+    if want in {"fr", "en"}:
+        other = "en" if want == "fr" else "fr"
+        # Clear evidence of the other language, and little of the preferred.
+        if want == "fr" and english - french >= 3 and french <= 1:
+            return other
+        if want == "en" and french - english >= 3 and english <= 1:
+            return other
+        return want
+    if french > english:
         return "fr"
     return "en"
+
+
+def _lang_code(value: str) -> str:
+    text = (value or "").strip().lower().replace("_", "-")
+    if text.startswith("fr"):
+        return "fr"
+    if text.startswith("en"):
+        return "en"
+    return ""
+
+
+def _language_scores(text: str) -> tuple[int, int]:
+    french = 0
+    english = 0
+    french += 2 * len(_FR_CHAR.findall(text or ""))
+    french += 2 * len(_FR_ELISION.findall(text or ""))
+    tokens = re.findall(r"[A-Za-zÀ-ÿ']+", text or "", flags=re.I)
+    for token in tokens:
+        key = token.casefold().replace("’", "'")
+        if "'" in key:
+            key = key.split("'", 1)[-1] or key
+        if key in _FR_WORDS:
+            french += 1
+        if key in _EN_WORDS:
+            english += 1
+    return french, english
+
+
+def _voice_key(text: str, *, preferred: str = "") -> str:
+    return speech_language(text, preferred=preferred)
 
 
 def resolve_device(requested: str) -> str:

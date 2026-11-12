@@ -102,8 +102,9 @@ class _Handler(BaseHTTPRequestHandler):
         if not text:
             self._json(400, {"error": "empty input"})
             return
+        language = str(payload.get("language") or "").strip()
         with _LOCK:
-            audio, status, reason = synthesize(text)
+            audio, status, reason = synthesize(text, language=language)
         if status != "ok" or not audio:
             self._json(503, {"error": reason or "empty audio"})
             return

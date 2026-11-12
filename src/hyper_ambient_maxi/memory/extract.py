@@ -182,6 +182,9 @@ def extract(text: str) -> ExtractResult:
     for fact in _life_facts(raw):
         facts = [old for old in facts if old.key != fact.key]
         facts.append(fact)
+    for fact in _person_facts(raw):
+        facts = [old for old in facts if old.key != fact.key]
+        facts.append(fact)
     if not any(fact.type == "constraint" for fact in facts):
         rule = _constraint_fact(raw)
         if rule is not None:
@@ -690,6 +693,99 @@ def _life_facts(text: str) -> list[ProposedFact]:
                 value=value,
                 evidence=text,
                 importance=0.75,
+            )
+        )
+    return found
+
+
+_RELATIONS = {
+    "mom": "mum",
+    "mother": "mum",
+    "mum": "mum",
+    "mère": "mum",
+    "mere": "mum",
+    "maman": "mum",
+    "dad": "dad",
+    "father": "dad",
+    "père": "dad",
+    "pere": "dad",
+    "papa": "dad",
+    "sister": "sister",
+    "sœur": "sister",
+    "soeur": "sister",
+    "brother": "brother",
+    "frère": "brother",
+    "frere": "brother",
+    "partner": "partner",
+    "wife": "wife",
+    "husband": "husband",
+    "femme": "wife",
+    "mari": "husband",
+    "son": "son",
+    "fils": "son",
+    "daughter": "daughter",
+    "fille": "daughter",
+    "friend": "friend",
+    "ami": "friend",
+    "amie": "friend",
+    "aunt": "aunt",
+    "tante": "aunt",
+    "uncle": "uncle",
+    "oncle": "uncle",
+    "cousin": "cousin",
+    "cousine": "cousin",
+    "grandmother": "grandmother",
+    "grandfather": "grandfather",
+    "grandma": "grandmother",
+    "grandpa": "grandfather",
+    "grand-mère": "grandmother",
+    "grand-mere": "grandmother",
+    "grand-père": "grandfather",
+    "grand-pere": "grandfather",
+}
+_REL_EN = "|".join(sorted((
+    "mom", "mother", "mum", "dad", "father", "sister", "brother",
+    "partner", "wife", "husband", "son", "daughter", "friend",
+    "aunt", "uncle", "cousin", "grandmother", "grandfather",
+    "grandma", "grandpa",
+), key=len, reverse=True))
+_REL_FR = "|".join(sorted((
+    "mère", "mere", "maman", "père", "pere", "papa", "sœur", "soeur",
+    "frère", "frere", "femme", "mari", "fils", "fille", "amie", "ami",
+    "oncle", "tante", "cousine", "cousin", "grand-mère", "grand-mere",
+    "grand-père", "grand-pere",
+), key=len, reverse=True))
+_PERSON_EN = re.compile(
+    rf"\bmy\s+({_REL_EN})(?:'s\s+name\s+is|\s+is\s+called|\s+is\s+named)\s+"
+    r"([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'-]{1,40})\b",
+    re.I,
+)
+_PERSON_FR = re.compile(
+    rf"\b(?:ma|mon)\s+({_REL_FR})\s+s['’]appelle\s+"
+    r"([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'-]{1,40})\b",
+    re.I,
+)
+
+
+def _person_facts(text: str) -> list[ProposedFact]:
+    found: list[ProposedFact] = []
+    seen: set[str] = set()
+    for match in list(_PERSON_EN.finditer(text)) + list(_PERSON_FR.finditer(text)):
+        relation = _RELATIONS.get(match.group(1).lower(), match.group(1).lower())
+        name = _name(match.group(2))
+        if not name or not relation:
+            continue
+        key = f"person:{relation}"
+        if key in seen:
+            continue
+        seen.add(key)
+        found.append(
+            _named(
+                key,
+                name,
+                f"User's {relation} is called {name}",
+                text,
+                0.8,
             )
         )
     return found

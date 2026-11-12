@@ -127,6 +127,9 @@ def _answer(user: str, memories: list[Fact], notes: list[str]) -> str:
             return "Je n'ai rien enregistré." if french else "I don't have anything stored yet."
         lead = "Je me souviens : " if french else "I remember: "
         return lead + "; ".join(fact.summary for fact in memories) + "."
+    person = _person_answer(user, slots, french)
+    if person is not None:
+        return person
     if re.search(r"\bmy name\b|je m'appelle|comment je m'appelle|who am i|qui suis-je", user, re.I):
         fact = slots.get("fact:user-name")
         if fact is None:
@@ -160,3 +163,75 @@ def _episode_about(memories: list[Fact], needles: tuple[str, ...]) -> Fact | Non
         if any(needle in haystack for needle in needles):
             return fact
     return None
+
+
+_PERSON_ASK = re.compile(
+    r"(?i)\b(sister|sœur|soeur|brother|frère|frere|mum|mom|mother|mère|mere|maman|"
+    r"dad|father|père|pere|papa|wife|husband|femme|mari|son|fils|daughter|fille|"
+    r"friend|ami|amie|aunt|tante|uncle|oncle|cousin|cousine)\b"
+)
+_PERSON_CANON = {
+    "sister": "sister",
+    "sœur": "sister",
+    "soeur": "sister",
+    "brother": "brother",
+    "frère": "brother",
+    "frere": "brother",
+    "mum": "mum",
+    "mom": "mum",
+    "mother": "mum",
+    "mère": "mum",
+    "mere": "mum",
+    "maman": "mum",
+    "dad": "dad",
+    "father": "dad",
+    "père": "dad",
+    "pere": "dad",
+    "papa": "dad",
+    "wife": "wife",
+    "femme": "wife",
+    "husband": "husband",
+    "mari": "husband",
+    "son": "son",
+    "fils": "son",
+    "daughter": "daughter",
+    "fille": "daughter",
+    "friend": "friend",
+    "ami": "friend",
+    "amie": "friend",
+    "aunt": "aunt",
+    "tante": "aunt",
+    "uncle": "uncle",
+    "oncle": "uncle",
+    "cousin": "cousin",
+    "cousine": "cousin",
+}
+
+
+def _person_answer(user: str, slots: dict[str, Fact], french: bool) -> str | None:
+    match = _PERSON_ASK.search(user)
+    if match is None:
+        return None
+    relation = _PERSON_CANON.get(match.group(1).lower())
+    if not relation:
+        return None
+    fact = slots.get(f"person:{relation}")
+    if fact is None:
+        return None
+    if french:
+        label = {
+            "sister": "Ta sœur",
+            "brother": "Ton frère",
+            "mum": "Ta mère",
+            "dad": "Ton père",
+            "wife": "Ta femme",
+            "husband": "Ton mari",
+            "son": "Ton fils",
+            "daughter": "Ta fille",
+            "friend": "Ton ami",
+            "aunt": "Ta tante",
+            "uncle": "Ton oncle",
+            "cousin": "Ton/ta cousin(e)",
+        }.get(relation, relation)
+        return f"{label} s'appelle {fact.value}."
+    return f"Your {relation} is called {fact.value}."

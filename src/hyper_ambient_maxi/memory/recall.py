@@ -58,6 +58,9 @@ _HINTS: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
     (re.compile(r"\brole\b", re.I), ("job:role",)),
     (re.compile(r"\bcodename\b", re.I), ("fact:test-codename",)),
     (re.compile(r"\bprefer\b|\bcoffee\b|\bmilk\b", re.I), ("preference:",)),
+    (re.compile(r"\bsister\b|\bsœur\b|\bsoeur\b", re.I), ("person:sister",)),
+    (re.compile(r"\bbrother\b|\bfrère\b|\bfrere\b", re.I), ("person:brother",)),
+    (re.compile(r"\bperson\b|\bfamily\b|\bfamille\b", re.I), ("person:",)),
 )
 _PROFILE = re.compile(r"what do you remember|what do you know about me", re.I)
 

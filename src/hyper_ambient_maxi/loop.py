@@ -17,7 +17,7 @@ from pathlib import Path
 
 from hyper_ambient_maxi.brain.scripted import ScriptedBrain
 from hyper_ambient_maxi.memory.extract import extract
-from hyper_ambient_maxi.memory.packet import build_packet
+from hyper_ambient_maxi.memory.packet import build_packet, prior_notes
 from hyper_ambient_maxi.memory.router import route
 from hyper_ambient_maxi.memory.store import (
     Fact,
@@ -95,7 +95,7 @@ def run_turn(
     packet = build_packet(store, user_text, receipt.corrections, embedder=_embedder())
     memories = packet.memories
     block = packet.text
-    notes = _prior_dog_names(store, user_text)
+    notes = prior_notes(store, user_text)
     reply, brain_name = _speak(
         brain,
         user_text,
@@ -164,22 +164,12 @@ def _obligations_met(store: MemoryStore, extracted, receipt: Receipt) -> bool:
     return True
 
 
-def _prior_dog_names(store: MemoryStore, user_text: str) -> list[str]:
-    if not re.search(r"used to", user_text, re.I):
-        return []
-    return [
-        fact.value
-        for fact in store.history("fact:dog-name")
-        if fact.status == "superseded"
-    ]
-
-
 def _address_name(store: MemoryStore) -> str:
-    """The name slot when one is stored. Otherwise Thomas."""
+    """The stored name slot, or empty when no name has been saved."""
     fact = store.slot("fact:user-name")
     if fact is not None and fact.value.strip():
         return fact.value.strip()
-    return "Thomas"
+    return ""
 
 
 def _speak(
@@ -191,7 +181,7 @@ def _speak(
     notes,
     warning,
     *,
-    user_name: str = "Thomas",
+    user_name: str = "",
 ) -> tuple[str, str]:
     try:
         reply = brain.reply(

@@ -78,19 +78,29 @@ _ADDRESS = re.compile(
 )
 
 
-def system_prompt(user_name: str = "Thomas") -> str:
-    """Maxi is the companion. The name slot is the user, otherwise Thomas."""
-    name = " ".join((user_name or "").split()) or "Thomas"
+def system_prompt(user_name: str = "") -> str:
+    """Maxi is the companion. The name slot is the user, when one is stored."""
+    name = " ".join((user_name or "").split())
+    if name:
+        who = f"The user is {name}. You are not the user. Never call the user Maxi.\n"
+    else:
+        who = (
+            "The user's name is not stored yet. "
+            "Do not invent a name for the user, and do not call them Thomas "
+            "unless that name is stored. Never call the user Maxi.\n"
+        )
     return (
         "You are Maxi, a local voice companion. "
-        f"The user is {name}. You are not the user. Never call the user Maxi.\n"
-        "Speak in one to three short sentences. Plain words. No lists. No markdown.\n"
-        "Use only the memory block for facts about the user's life. "
-        "If a fact is not in that block, say you do not have it stored.\n"
-        "The harness saves memories itself. Say that something was saved "
-        "only when the harness note says so.\n"
-        "Never mention importance, relevance, or recency. There are no scores.\n"
-        "Pets, family, and jobs belong to the user, not to you."
+        + who
+        + (
+            "Speak in one to three short sentences. Plain words. No lists. No markdown.\n"
+            "Use only the memory block for facts about the user's life. "
+            "If a fact is not in that block, say you do not have it stored.\n"
+            "The harness saves memories itself. Say that something was saved "
+            "only when the harness note says so.\n"
+            "Never mention importance, relevance, or recency. There are no scores.\n"
+            "Pets, family, and jobs belong to the user, not to you."
+        )
     )
 
 
@@ -134,7 +144,6 @@ class OpenAICompatBrain:
         warning: str | None = None,
         **extra,
     ) -> str:
-        del notes
         if warning:
             user = user + "\n\nWorth raising, say this plainly: " + warning
         called = str(extra.get("user_name") or "").strip() or _user_name(memories, receipt)
@@ -143,6 +152,13 @@ class OpenAICompatBrain:
             system += "\n\n" + context
         else:
             system += "\n\nNo stored memories were selected for this turn."
+        if notes:
+            earlier = ", ".join(str(note).strip() for note in notes if str(note).strip())
+            if earlier:
+                system += (
+                    "\n\nEarlier values of a slot, use these if the user asks "
+                    "what something used to be: " + earlier
+                )
         if receipt.facts:
             saved = "; ".join(fact.summary for fact in receipt.facts)
             system += "\n\nThe harness already saved: " + saved
@@ -184,8 +200,17 @@ class OpenAICompatBrain:
             "stop": list(_STOPS),
         }
         if disable_thinking:
-            body["chat_template_kwargs"] = {"enable_thinking": False}
+            # Cover the llama.cpp / Qwen / LFM template flags we have seen.
+            # LFM2.5-8B still spent hidden reasoning tokens with only
+            # enable_thinking=False, so the request also sends think=false
+            # and a zero reasoning budget when the server honors them.
+            body["chat_template_kwargs"] = {
+                "enable_thinking": False,
+                "thinking": False,
+            }
             body["reasoning_effort"] = "none"
+            body["think"] = False
+            body["reasoning_budget"] = 0
         return body
 
     def _headers(self) -> dict[str, str]:
@@ -275,7 +300,7 @@ def _user_name(memories: list, receipt: Receipt) -> str:
     for fact in found:
         if getattr(fact, "key", "") == "fact:user-name" and str(fact.value).strip():
             return str(fact.value).strip()
-    return "Thomas"
+    return ""
 
 
 def _drop_user_maxi(text: str) -> str:

@@ -224,9 +224,11 @@ def test_packet_orders_priority_without_printing_it(tmp_path):
             conversation_id="test",
         )
     packet = build_packet(store, "what do you remember about me?")
-    assert "Open threads:" in packet.text
-    threads = packet.text.split("Open threads:", 1)[1]
-    assert threads.index("diabetes") < threads.index("Airbus")
+    # The job and diagnosis threads repeat the fact summaries, so they
+    # stay out of the prompt. Priority order is checked on render() above.
+    assert packet.text.count("Airbus") == 1
+    assert packet.text.count("diabetes") == 1
+    assert "Open threads:" not in packet.text
     _assert_no_rank_words(packet.text)
 
 
@@ -258,3 +260,42 @@ def test_recall_ignores_superseded_values(tmp_path):
     assert [fact.value for fact in remembered] == ["Biscuit"]
     assert store.history("fact:dog-name")[0].value == "Pixel"
     assert store.history("fact:dog-name")[0].status == "superseded"
+
+
+def test_sister_is_a_person_slot_not_an_episode():
+    extracted = extract("My sister is called Léa.")
+    assert [(fact.key, fact.value) for fact in extracted.facts] == [("person:sister", "Léa")]
+    assert extracted.durable_unparsed is False
+    assert not any(fact.key.startswith("episode:") for fact in extracted.facts)
+    french = extract("Ma sœur s'appelle Léa.")
+    assert [(fact.key, fact.value) for fact in french.facts] == [("person:sister", "Léa")]
+    named = extract("My sister's name is Ada.")
+    assert named.facts[0].key == "person:sister"
+    assert named.facts[0].value == "Ada"
+
+
+def test_earlier_dog_name_reaches_the_packet(tmp_path):
+    from hyper_ambient_maxi.memory.packet import build_packet
+
+    store = MemoryStore(tmp_path)
+    _commit(store, "My dog is called Pixel.")
+    _commit(store, RENAME)
+    current = build_packet(store, "What's my dog's name?")
+    assert "Biscuit" in current.text
+    assert "Earlier values:" not in current.text
+    assert "Pixel" not in current.text
+    past = build_packet(store, "What did I used to call my dog?")
+    assert "Earlier values:" in past.text
+    assert "previously called Pixel" in past.text
+    assert "Biscuit" in past.text
+
+
+def test_stt_use_to_still_recalls_the_earlier_dog_name(tmp_path):
+    from hyper_ambient_maxi.memory.packet import build_packet, asks_about_past
+
+    store = MemoryStore(tmp_path)
+    _commit(store, "My dog is called Pixel.")
+    _commit(store, RENAME)
+    assert asks_about_past("What did I use to call my dog?")
+    past = build_packet(store, "What did I use to call my dog?")
+    assert "previously called Pixel" in past.text
