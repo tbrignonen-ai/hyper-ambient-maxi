@@ -28,7 +28,12 @@ from hyper_ambient_maxi.loop import run_turn
 from hyper_ambient_maxi.memory.store import MemoryStore
 from hyper_ambient_maxi.voice import run_audio_turn
 
-_PROMPT = "My dog is Pixel. Biscuit."
+# Used only to check that form fields and decode options are forwarded.
+_PROMPT = "Pixel. Luna."
+# Per-turn prompts name only the word spoken on that turn. A shared
+# prompt that also contains the previous name biased French STT.
+EN = "My dog is Pixel."
+FR = "Je l'ai renommé Luna."
 
 
 def names_close(actual: str, expected: str) -> bool:
@@ -128,9 +133,9 @@ def test_http_ears_and_mouth_round_trip(tmp_path):
     ears_url = f"http://127.0.0.1:{ears.server_address[1]}"
     mouth_url = f"http://127.0.0.1:{mouth.server_address[1]}"
     try:
-        en, status, reason = synthesize("My dog is Pixel.")
+        en, status, reason = synthesize(EN, language="en")
         assert status == "ok" and en, reason
-        fr, status, reason = synthesize("Je l'ai renommé Biscuit.")
+        fr, status, reason = synthesize(FR, language="fr")
         assert status == "ok" and fr, reason
         store = MemoryStore(tmp_path)
         brain = ScriptedBrain()
@@ -143,8 +148,8 @@ def test_http_ears_and_mouth_round_trip(tmp_path):
             ears_url=ears_url,
             mouth_url=mouth_url,
             language="en",
-            initial_prompt=_PROMPT,
-            hotwords="Pixel Biscuit",
+            initial_prompt="Pixel.",
+            hotwords="Pixel",
         )
         assert named.status == "ok", named.reason
         assert named.turn is not None and named.turn.memory_ok
@@ -160,15 +165,17 @@ def test_http_ears_and_mouth_round_trip(tmp_path):
             ears_url=ears_url,
             mouth_url=mouth_url,
             language="fr",
-            initial_prompt=_PROMPT,
-            hotwords="Biscuit",
+            initial_prompt="Luna.",
+            hotwords="Luna",
         )
         assert renamed.status == "ok", renamed.reason
         dog = store.slot("fact:dog-name")
-        assert dog is not None and names_close(dog.value, "Biscuit"), dog.value if dog else None
+        assert dog is not None and names_close(dog.value, "Luna"), dog.value if dog else None
+        assert not names_close(dog.value, "Pixel")
         assert renamed.audio and renamed.audio[:4] == b"RIFF"
         asked = run_turn(store, brain, "What's my dog's name?")
         assert dog.value in asked.reply
+        assert "Pixel" not in asked.reply
     finally:
         ears.shutdown()
         mouth.shutdown()

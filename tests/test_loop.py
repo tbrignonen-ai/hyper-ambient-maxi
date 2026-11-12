@@ -225,13 +225,13 @@ def test_openai_client_never_speaks_reasoning_and_keeps_the_key_out(monkeypatch)
     assert "secret" not in text
     assert "What else" not in text
     assert len(bodies) == 2
-    assert bodies[0]["max_tokens"] == 200
+    assert bodies[0]["max_tokens"] == 96
     assert bodies[0]["chat_template_kwargs"]["enable_thinking"] is False
     assert bodies[0]["chat_template_kwargs"]["thinking"] is False
     assert bodies[0]["reasoning_effort"] == "none"
     assert bodies[0]["think"] is False
     assert bodies[0]["reasoning_budget"] == 0
-    assert bodies[1]["max_tokens"] >= 800
+    assert bodies[1]["max_tokens"] == 192
     assert bodies[1]["chat_template_kwargs"]["enable_thinking"] is False
     assert bodies[1]["reasoning_effort"] == "none"
     assert bodies[1]["think"] is False
@@ -271,6 +271,7 @@ def test_llama_local_disables_thinking_on_the_first_request(monkeypatch):
     text = brain.reply("What's my dog's name?", "<memory>\n- Biscuit\n</memory>", Receipt(0, True), [])
     assert text == "Your dog's name is Biscuit."
     assert len(bodies) == 1
+    assert bodies[0]["max_tokens"] == 96
     assert bodies[0]["chat_template_kwargs"]["enable_thinking"] is False
     assert bodies[0]["think"] is False
     assert bodies[0]["reasoning_budget"] == 0
@@ -312,6 +313,45 @@ def test_think_true_leaves_the_first_request_alone(monkeypatch):
     assert "hidden" not in text
     assert "enable_thinking" not in json.dumps(bodies[0])
     assert bodies[1]["chat_template_kwargs"]["enable_thinking"] is False
+
+
+def test_think_off_caps_spoken_tokens_and_think_on_keeps_the_budget(monkeypatch):
+    import urllib.request
+
+    from hyper_ambient_maxi.brain.openai_compat import SPEAK_MAX_TOKENS
+    from hyper_ambient_maxi.memory.store import Receipt
+
+    bodies = []
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return json.dumps(
+                {"choices": [{"message": {"content": "Okay, Pixel it is."}}]}
+            ).encode()
+
+    def fake_urlopen(request, timeout=0):
+        bodies.append(json.loads(request.data.decode()))
+        return Response()
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    OpenAICompatBrain(max_tokens=512, think=False).reply(
+        "My dog is called Pixel.", "", Receipt(0, True), []
+    )
+    assert bodies[-1]["max_tokens"] == SPEAK_MAX_TOKENS
+    OpenAICompatBrain(max_tokens=32, think=False).reply(
+        "My dog is called Pixel.", "", Receipt(0, True), []
+    )
+    assert bodies[-1]["max_tokens"] == 32
+    OpenAICompatBrain(max_tokens=512, think=True).reply(
+        "My dog is called Pixel.", "", Receipt(0, True), []
+    )
+    assert bodies[-1]["max_tokens"] == 512
 
 
 def test_empty_content_after_retry_does_not_voice_the_thought(monkeypatch):

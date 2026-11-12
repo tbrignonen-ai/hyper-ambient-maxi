@@ -29,6 +29,10 @@ import urllib.request
 
 from hyper_ambient_maxi.memory.store import Fact, Receipt
 
+# 1–3 spoken sentences fit in well under this. Without a cap, LFM3
+# sometimes fills a 512-token budget with planning and a turn takes 10–22s.
+SPEAK_MAX_TOKENS = 96
+
 _STOPS = [
     "\nUser:",
     "\nuser:",
@@ -171,7 +175,7 @@ class OpenAICompatBrain:
             system += "\n\nThe harness did not save a new fact on this turn."
         payload = self._post(
             "/chat/completions",
-            self._body(system, user, self.max_tokens, disable_thinking=not self.think),
+            self._body(system, user, self._token_budget(), disable_thinking=not self.think),
         )
         text = speakable_text(payload, max_sentences=self.max_sentences)
         if text:
@@ -182,11 +186,10 @@ class OpenAICompatBrain:
         # retry spends the budget on the reply and asks the template to
         # stop thinking. A second empty content falls through to the
         # scripted brain instead of voicing the chain of thought.
-        retry_tokens = min(4096, max(self.max_tokens * 4, 1024))
         try:
             payload = self._post(
                 "/chat/completions",
-                self._body(system, user, retry_tokens, disable_thinking=True),
+                self._body(system, user, self._token_budget(retry=True), disable_thinking=True),
             )
         except Exception as exc:
             raise RuntimeError("model returned no speakable content") from exc
@@ -196,6 +199,17 @@ class OpenAICompatBrain:
         return polish_reply(
             text, spoken_user, context=context, notes=notes, receipt=receipt, memories=memories
         )
+
+    def _token_budget(self, *, retry: bool = False) -> int:
+        """Keep voice turns short when thinking is off."""
+        if retry:
+            raw = min(4096, max(self.max_tokens * 4, 1024))
+            if self.think:
+                return raw
+            return min(raw, SPEAK_MAX_TOKENS * 2)
+        if self.think:
+            return self.max_tokens
+        return min(self.max_tokens, SPEAK_MAX_TOKENS)
 
     def _body(self, system: str, user: str, max_tokens: int, *, disable_thinking: bool) -> dict:
         body = {
