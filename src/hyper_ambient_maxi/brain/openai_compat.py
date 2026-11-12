@@ -95,8 +95,10 @@ def system_prompt(user_name: str = "") -> str:
         + (
             "Speak in one to three short sentences. Plain words. No lists. No markdown. No emoji.\n"
             "Do not repeat the user's sentence as your reply. "
-            "After a new fact is saved, acknowledge it in your own words. "
-            "Prefer Okay or I'll remember that, not Got it.\n"
+            "After a new fact is saved, confirm the stored value in your own words, "
+            "naming that value. Prefer Okay or I'll remember that, not Got it.\n"
+            "Speak about the user's life in the second person: say your dog, not my dog.\n"
+            "If the user is only greeting you, greet them warmly and do not mention memory.\n"
             "Use only the memory block for facts about the user's life. "
             "If a fact is not in that block, say you do not have it stored. "
             "If the block or an earlier-values note has the answer, do not say it is missing.\n"
@@ -155,8 +157,6 @@ class OpenAICompatBrain:
         system = system_prompt(called)
         if context:
             system += "\n\n" + context
-        else:
-            system += "\n\nNo stored memories were selected for this turn."
         if notes:
             earlier = ", ".join(str(note).strip() for note in notes if str(note).strip())
             if earlier:
@@ -304,6 +304,26 @@ def clean_reply(text: str, max_sentences: int = 3) -> str:
     return " ".join(cleaned.split())
 
 
+_REASONING_LEAK = re.compile(
+    r"(?i)("
+    r"\bthe user\b|"
+    r"memory block|"
+    r"harness already saved|"
+    r"in memory from|"
+    r"fact:[\w-]+|"
+    r"i (?:just )?need to|"
+    r"i(?:'ll| will) say|"
+    r"say something like|"
+    r"something like:|"
+    r"in my own words|"
+    r"without repeating|"
+    r"without mentioning|"
+    r"already stored|"
+    r"existing memory|"
+    r"they're essentially|"
+    r"this matches what"
+    r")"
+)
 _GOT_IT = re.compile(r"(?i)^got it\b(?:[,.!?]\s*|\s+)")
 _GENERIC_HEDGE = re.compile(
     r"(?i)^(?:"
@@ -337,10 +357,16 @@ def polish_reply(
     memory block already has the answer.
     """
     cleaned = _rewrite_acks(text)
+    cleaned = _drop_reasoning(cleaned)
     has_memory = _has_memory(context, notes, receipt, memories)
     cleaned = _drop_hedges(cleaned, has_memory=has_memory)
     cleaned = _drop_echo(cleaned, user, receipt)
+    cleaned = _second_person(cleaned)
     cleaned = _drop_trailing_okay(cleaned)
+    cleaned = _confirm_save(cleaned, user, receipt)
+    cleaned = _drop_stray_save_ack(cleaned, receipt)
+    cleaned = _drop_memory_talk(cleaned, user)
+    cleaned = _warm_greeting(cleaned, user, context, notes, receipt, memories)
     cleaned = " ".join(cleaned.split())
     if cleaned:
         return cleaned
@@ -349,6 +375,15 @@ def polish_reply(
 
 def _rewrite_acks(text: str) -> str:
     return _GOT_IT.sub("Okay. ", text or "", count=1).strip()
+
+
+def _drop_reasoning(text: str) -> str:
+    """Planning or memory-bookkeeping must never be spoken."""
+    sentences = _split_sentences(text)
+    kept = [sentence for sentence in sentences if not _REASONING_LEAK.search(sentence)]
+    if kept and len(kept) == len(sentences):
+        return text
+    return " ".join(kept)
 
 
 def _has_memory(context: str, notes, receipt: Receipt | None, memories) -> bool:
@@ -426,6 +461,25 @@ def _words(text: str) -> list[str]:
 
 
 _TRAILING_OKAY = re.compile(r"(?i)^(okay|ok)\.?$")
+_CONFIRM_VERB = re.compile(
+    r"(?i)\b("
+    r"okay|ok|d'accord|remember|remembered|noted|updated|saved|it is|"
+    r"i'll remember|je vais m'en souvenir|c'est|called|named|name is|"
+    r"s'appelle|s'appelait|renamed"
+    r")\b"
+)
+_STRAY_SAVE_ACK = re.compile(
+    r"(?i)^(?:"
+    r"(?:okay|ok|d'accord)[,.]?\s+(?:then(?:\s+the value)?,?\s+)?(?:c'est\s+)?.+?(?:\s+it is)?|"
+    r"(?:okay|ok|d'accord)[,.]?\s+then it is|"
+    r"it(?:'s| is) saved|"
+    r"that(?:'s| is) saved|"
+    r"i(?:'ve| have) saved (?:that|it)"
+    r")[.!?]?$"
+)
+_META_ASK = re.compile(
+    r"(?i)^you asked earlier (?:that |if |whether )?"
+)
 
 
 def _drop_trailing_okay(text: str) -> str:
@@ -436,6 +490,145 @@ def _drop_trailing_okay(text: str) -> str:
     return text
 
 
+def _drop_stray_save_ack(text: str, receipt: Receipt | None) -> str:
+    """A leftover 'Okay, {value} it is' must not follow a recall answer."""
+    if receipt is not None and getattr(receipt, "facts", None):
+        return text
+    sentences = _split_sentences(text)
+    kept = [sentence for sentence in sentences if not _STRAY_SAVE_ACK.match(sentence.strip())]
+    return _drop_meta_ask(" ".join(kept))
+
+
+def _drop_memory_talk(text: str, user: str) -> str:
+    """Drop leftover memory bookkeeping once the answer has been said."""
+    if _GREETING.match(user or ""):
+        return text
+    sentences = _split_sentences(text)
+    kept = [sentence for sentence in sentences if not _MEMORY_TALK.search(sentence)]
+    if kept:
+        return " ".join(kept)
+    return text
+
+
+def _drop_meta_ask(text: str) -> str:
+    """A spoken answer should not narrate that the user just asked."""
+    match = _META_ASK.match(text or "")
+    if not match:
+        return text
+    rest = (text or "")[match.end():].lstrip()
+    if not rest:
+        return text
+    return rest[0].upper() + rest[1:]
+
+
+_LIFE_EN = (
+    "dog|puppy|pet|cat|mum|mom|mother|dad|father|sister|brother|wife|husband|"
+    "son|daughter|friend|family|job|employer|role|home|house|apartment|city|"
+    "partner|aunt|uncle|cousin|grandma|grandpa|grandmother|grandfather"
+)
+_MY_LIFE = re.compile(rf"(?i)\bmy ({_LIFE_EN})\b")
+_MON_LIFE = re.compile(
+    r"(?i)\b(?:mon (chien|frère|frere|père|pere|papa|fils|ami|oncle|cousin|travail|poste|emploi)|"
+    r"ma (sœur|soeur|mère|mere|maman|femme|fille|amie|tante|cousine|famille|ville)|"
+    r"mes (chiens|parents|enfants|amis))\b"
+)
+_MEMORY_TALK = re.compile(
+    r"(?i)\b(?:stored memories|memory block|in my memory|no stored|"
+    r"don't have any stored|do not have any stored|no memories|"
+    r"nothing stored|stored details|other stored|"
+    r"aucun souvenir|pas de (?:mémoire|memoire|souvenir))\b"
+)
+
+
+def _second_person(text: str) -> str:
+    """Maxi talks about the user's life as yours, not mine."""
+    def en(match: re.Match[str]) -> str:
+        noun = match.group(1)
+        lead = "Your" if match.group(0)[0].isupper() else "your"
+        return f"{lead} {noun}"
+
+    cleaned = _MY_LIFE.sub(en, text or "")
+    def fr(match: re.Match[str]) -> str:
+        whole = match.group(0)
+        lower = whole.lower()
+        if lower.startswith("mon "):
+            lead = "Ton" if whole[0].isupper() else "ton"
+            return f"{lead} {match.group(1)}"
+        if lower.startswith("ma "):
+            lead = "Ta" if whole[0].isupper() else "ta"
+            return f"{lead} {match.group(2)}"
+        lead = "Tes" if whole[0].isupper() else "tes"
+        return f"{lead} {match.group(3)}"
+
+    return _MON_LIFE.sub(fr, cleaned)
+
+
+def _confirm_save(text: str, user: str, receipt: Receipt | None) -> str:
+    """A save ack must name the value that was actually written."""
+    facts = list(getattr(receipt, "facts", None) or [])
+    if not facts:
+        return text
+    if _mentions_saved(text, facts) and _CONFIRM_VERB.search(text or ""):
+        return text
+    return _save_ack(user, facts)
+
+
+def _mentions_saved(text: str, facts: list) -> bool:
+    lowered = (text or "").casefold()
+    for fact in facts:
+        value = str(getattr(fact, "value", "") or "").strip()
+        if value and value.casefold() in lowered:
+            return True
+    return False
+
+
+def _save_ack(user: str, facts: list) -> str:
+    french = _looks_french(user)
+    if len(facts) == 1 and _short_value(getattr(facts[0], "value", "")):
+        kind = str(getattr(facts[0], "type", "") or "")
+        if kind not in {"health", "constraint"}:
+            value = str(facts[0].value).strip()
+            if french:
+                return f"D'accord, c'est {value}."
+            return f"Okay, {value} it is."
+    summaries = "; ".join(
+        str(getattr(fact, "summary", "") or getattr(fact, "value", "")).strip()
+        for fact in facts
+        if str(getattr(fact, "summary", "") or getattr(fact, "value", "")).strip()
+    )
+    if not summaries:
+        return "D'accord." if french else "Okay."
+    if french:
+        return f"Je vais m'en souvenir. {summaries}."
+    return f"I'll remember that. {summaries}."
+
+
+def _short_value(value: str) -> bool:
+    tokens = (value or "").split()
+    return 0 < len(tokens) <= 3 and len(value.strip()) <= 40
+
+
+def _warm_greeting(
+    text: str,
+    user: str,
+    context: str,
+    notes,
+    receipt: Receipt | None,
+    memories,
+) -> str:
+    if not _GREETING.match(user or ""):
+        return text
+    if not _MEMORY_TALK.search(text or "") and " ".join((text or "").split()):
+        return text
+    french = _looks_french(user)
+    match = _GREETING.match(text or "") or _GREETING.match(user or "")
+    greet = match.group(0) if match else ("Bonjour" if french else "Hello")
+    greet = greet[0].upper() + greet[1:]
+    if french:
+        return f"{greet}, je suis là."
+    return f"{greet}. I'm here."
+
+
 def _fallback_ack(user: str, receipt: Receipt | None, memories=None, notes=None) -> str:
     french = _looks_french(user)
     prior = [str(note).strip() for note in (notes or []) if str(note).strip()]
@@ -444,22 +637,16 @@ def _fallback_ack(user: str, receipt: Receipt | None, memories=None, notes=None)
         if french:
             return f"Avant, c'était {value}."
         return f"That was previously {value}."
-    facts = list(getattr(receipt, "facts", None) or []) or list(memories or [])
+    facts = list(getattr(receipt, "facts", None) or [])
     if facts:
-        summaries = "; ".join(
-            str(getattr(fact, "summary", "") or getattr(fact, "value", "")).strip()
-            for fact in facts
-            if str(getattr(fact, "summary", "") or getattr(fact, "value", "")).strip()
-        )
-        if summaries:
-            lead = "Je vais m'en souvenir. " if french else "I'll remember that. "
-            return f"{lead}{summaries}."
-    return "Je suis là." if french else "Okay."
+        return _save_ack(user, facts)
+    return "Je suis là." if french else "Hello. I'm here." if _GREETING.match(user or "") else "Okay."
 
 
 def _looks_french(text: str) -> bool:
     return re.search(
-        r"(?i)\b(?:je|tu|il|elle|nous|vous|mon|ma|mes|ton|ta|chien|appelle|souvenir|d'accord)\b",
+        r"(?i)\b(?:je|tu|il|elle|nous|vous|mon|ma|mes|ton|ta|chien|appelle|souvenir|"
+        r"d'accord|bonjour|salut|bonsoir|coucou)\b",
         text or "",
     ) is not None
 

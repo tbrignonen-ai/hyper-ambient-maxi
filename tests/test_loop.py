@@ -417,6 +417,9 @@ def test_the_user_is_not_addressed_as_maxi(monkeypatch, tmp_path):
     assert "do not say it is missing" in system_prompt("Ada")
     assert "Do not repeat the user's sentence" in prompt
     assert "not Got it" in prompt
+    assert "confirm the stored value" in prompt
+    assert "say your dog, not my dog" in prompt
+    assert "do not mention memory" in prompt
     assert "The user is Ada" in system_prompt("Ada")
     untitled = system_prompt("")
     assert "The user is Thomas" not in untitled
@@ -534,6 +537,8 @@ def test_default_prompt_does_not_name_the_user_thomas(tmp_path, monkeypatch):
     system = bodies[0]["messages"][0]["content"]
     assert "The user is Thomas" not in system
     assert "name is not stored yet" in system
+    assert "No stored memories were selected" not in system
+    assert "do not mention memory" in system
 
 
 def test_polish_reply_rewrites_got_it_and_drops_echo_and_hedge():
@@ -572,7 +577,7 @@ def test_polish_reply_rewrites_got_it_and_drops_echo_and_hedge():
             ],
         ),
     )
-    assert echoed == "I'll remember that. User's dog is called Biscuit."
+    assert echoed == "Okay, Biscuit it is."
     assert "I renamed him to Biscuit." not in echoed
     # A greeting echo is allowed.
     assert polish_reply("Hello.", "Hello.") == "Hello."
@@ -600,3 +605,151 @@ def test_polish_reply_rewrites_got_it_and_drops_echo_and_hedge():
     assert polish_reply("I do not have that stored.", "What is my postal code?") == (
         "I do not have that stored."
     )
+
+
+def test_polish_reply_confirms_saved_value_and_fixes_perspective():
+    from hyper_ambient_maxi.brain.openai_compat import polish_reply
+    from hyper_ambient_maxi.memory.store import Fact, Receipt
+
+    biscuit = Fact(
+        id="1",
+        key="fact:dog-name",
+        type="personal_fact",
+        summary="User's dog is called Biscuit",
+        value="Biscuit",
+        status="active",
+        created_at="2026-11-12T00:00:00.000Z",
+        source="test",
+        source_agent="test",
+        conversation_id="t",
+        evidence="I renamed him to Biscuit.",
+        importance=0.8,
+    )
+    receipt = Receipt(stored=1, verified=True, facts=[biscuit])
+    assert polish_reply("I'll remember that.", "I renamed him to Biscuit.", receipt=receipt) == (
+        "Okay, Biscuit it is."
+    )
+    assert polish_reply("Okay, Biscuit it is.", "I renamed him to Biscuit.", receipt=receipt) == (
+        "Okay, Biscuit it is."
+    )
+    assert polish_reply(
+        "That sounds lovely! I can tell Pixel is a great companion.",
+        "My dog is called Pixel.",
+        receipt=Receipt(
+            stored=1,
+            verified=True,
+            facts=[
+                Fact(
+                    id="2",
+                    key="fact:dog-name",
+                    type="personal_fact",
+                    summary="User's dog is called Pixel",
+                    value="Pixel",
+                    status="active",
+                    created_at="2026-11-12T00:00:00.000Z",
+                    source="test",
+                    source_agent="test",
+                    conversation_id="t",
+                    evidence="My dog is called Pixel.",
+                    importance=0.8,
+                )
+            ],
+        ),
+    ) == "Okay, Pixel it is."
+    assert polish_reply(
+        "Okay. I've updated his name to Biscuit.",
+        "I renamed him to Biscuit.",
+        receipt=receipt,
+    ) == "Okay. I've updated his name to Biscuit."
+    # A leftover save ack must not trail a recall answer.
+    assert polish_reply(
+        "Your dog was previously called Pixel. Okay, Biscuit it is.",
+        "What did I used to call my dog?",
+    ) == "Your dog was previously called Pixel."
+    assert polish_reply(
+        "You asked earlier that your dog was previously called Pixel, so you used to call it Pixel. Okay, Pixel. It's saved.",
+        "What did I used to call my dog?",
+    ) == "Your dog was previously called Pixel, so you used to call it Pixel."
+    assert polish_reply(
+        "Your dog was previously called Pixel. Okay, then it is. I do not have any other stored details about your life right now.",
+        "What did I used to call my dog?",
+    ) == "Your dog was previously called Pixel."
+    # A model that already names the value is left alone, but first person is fixed.
+    assert polish_reply(
+        "My dog was previously called Pixel.",
+        "What did I used to call my dog?",
+    ) == "Your dog was previously called Pixel."
+    assert polish_reply(
+        "Mon chien s'appelait Pixel.",
+        "Comment s'appelait mon chien avant ?",
+    ) == "Ton chien s'appelait Pixel."
+    # Maxi's own first person stays.
+    assert polish_reply("I'll remember that. I'm here.", "Thanks.") == (
+        "I'll remember that. I'm here."
+    )
+    # A bare greeting must not talk about stored memories.
+    assert polish_reply(
+        "Hello. I do not have any stored memories for this turn.",
+        "Hello.",
+    ) == "Hello. I'm here."
+    assert polish_reply(
+        "Bonjour. Je n'ai pas de souvenir stocké.",
+        "Bonjour.",
+    ) == "Bonjour, je suis là."
+
+    leaked = (
+        "Okay, the user just told me their dog's name is Pixel. "
+        "I already have that in memory from before."
+    )
+    pixel = Fact(
+        id="3",
+        key="fact:dog-name",
+        type="personal_fact",
+        summary="User's dog is called Pixel",
+        value="Pixel",
+        status="active",
+        created_at="2026-11-12T00:00:00.000Z",
+        source="test",
+        source_agent="test",
+        conversation_id="t",
+        evidence="My dog is called Pixel.",
+        importance=0.8,
+    )
+    assert polish_reply(
+        leaked,
+        "My dog is called Pixel.",
+        receipt=Receipt(stored=1, verified=True, facts=[pixel]),
+    ) == "Okay, Pixel it is."
+    assert "the user" not in polish_reply(
+        leaked,
+        "My dog is called Pixel.",
+        receipt=Receipt(stored=1, verified=True, facts=[pixel]),
+    ).lower()
+    planned = (
+        "I just need to confirm it in my own words without repeating the sentence. "
+        "I'll say something like: You told me you renamed him, and I have that noted as Biscuit."
+    )
+    assert polish_reply(
+        planned,
+        "I renamed him to Biscuit.",
+        receipt=Receipt(
+            stored=1,
+            verified=True,
+            facts=[
+                Fact(
+                    id="4",
+                    key="fact:dog-name",
+                    type="personal_fact",
+                    summary="User's dog is called Biscuit",
+                    value="Biscuit",
+                    status="active",
+                    created_at="2026-11-12T00:00:00.000Z",
+                    source="test",
+                    source_agent="test",
+                    conversation_id="t",
+                    evidence="I renamed him to Biscuit.",
+                    importance=0.8,
+                )
+            ],
+        ),
+    ) == "Okay, Biscuit it is."
