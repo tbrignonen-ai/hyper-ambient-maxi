@@ -415,6 +415,8 @@ def test_the_user_is_not_addressed_as_maxi(monkeypatch, tmp_path):
     assert "Never call the user Maxi" in prompt
     assert "No emoji" in prompt
     assert "do not say it is missing" in system_prompt("Ada")
+    assert "Do not repeat the user's sentence" in prompt
+    assert "not Got it" in prompt
     assert "The user is Ada" in system_prompt("Ada")
     untitled = system_prompt("")
     assert "The user is Thomas" not in untitled
@@ -532,3 +534,60 @@ def test_default_prompt_does_not_name_the_user_thomas(tmp_path, monkeypatch):
     system = bodies[0]["messages"][0]["content"]
     assert "The user is Thomas" not in system
     assert "name is not stored yet" in system
+
+
+def test_polish_reply_rewrites_got_it_and_drops_echo_and_hedge():
+    from hyper_ambient_maxi.brain.openai_compat import polish_reply
+    from hyper_ambient_maxi.memory.store import Fact, Receipt
+
+    assert polish_reply("Got it, I've noted that.", "I renamed him to Biscuit.") == (
+        "Okay. I've noted that."
+    )
+    assert polish_reply("Got it.", "My dog is called Pixel.") == "Okay."
+    assert polish_reply(
+        "Okay. I've noted that your dog is named Pixel. Okay.",
+        "My dog is called Pixel.",
+    ) == "Okay. I've noted that your dog is named Pixel."
+    echoed = polish_reply(
+        "I renamed him to Biscuit.",
+        "I renamed him to Biscuit.",
+        receipt=Receipt(
+            stored=1,
+            verified=True,
+            facts=[
+                Fact(
+                    id="1",
+                    key="fact:dog-name",
+                    type="personal_fact",
+                    summary="User's dog is called Biscuit",
+                    value="Biscuit",
+                    status="active",
+                    created_at="2026-11-12T00:00:00.000Z",
+                    source="test",
+                    source_agent="test",
+                    conversation_id="t",
+                    evidence="I renamed him to Biscuit.",
+                    importance=0.8,
+                )
+            ],
+        ),
+    )
+    assert echoed == "I'll remember that. User's dog is called Biscuit."
+    assert "I renamed him to Biscuit." not in echoed
+    # A greeting echo is allowed.
+    assert polish_reply("Hello.", "Hello.") == "Hello."
+    # "Your dog" is not an echo of "My dog".
+    assert polish_reply("Your dog is called Pixel.", "My dog is called Pixel.") == (
+        "Your dog is called Pixel."
+    )
+    hedged = polish_reply(
+        "I do not have that stored. The previous name was Pixel but now it is Biscuit.",
+        "What did I used to call my dog?",
+        context="<memory>\nEarlier values:\n- The dog was previously called Pixel\n</memory>",
+    )
+    assert hedged == "The previous name was Pixel but now it is Biscuit."
+    assert "do not have" not in hedged.lower()
+    # A genuine miss, with no memory, is left alone.
+    assert polish_reply("I do not have that stored.", "What is my postal code?") == (
+        "I do not have that stored."
+    )

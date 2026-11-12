@@ -94,6 +94,9 @@ def system_prompt(user_name: str = "") -> str:
         + who
         + (
             "Speak in one to three short sentences. Plain words. No lists. No markdown. No emoji.\n"
+            "Do not repeat the user's sentence as your reply. "
+            "After a new fact is saved, acknowledge it in your own words. "
+            "Prefer Okay or I'll remember that, not Got it.\n"
             "Use only the memory block for facts about the user's life. "
             "If a fact is not in that block, say you do not have it stored. "
             "If the block or an earlier-values note has the answer, do not say it is missing.\n"
@@ -145,6 +148,7 @@ class OpenAICompatBrain:
         warning: str | None = None,
         **extra,
     ) -> str:
+        spoken_user = user
         if warning:
             user = user + "\n\nWorth raising, say this plainly: " + warning
         called = str(extra.get("user_name") or "").strip() or _user_name(memories, receipt)
@@ -171,7 +175,9 @@ class OpenAICompatBrain:
         )
         text = speakable_text(payload, max_sentences=self.max_sentences)
         if text:
-            return text
+            return polish_reply(
+                text, spoken_user, context=context, notes=notes, receipt=receipt, memories=memories
+            )
         # Empty content is not a license to read reasoning_content. One
         # retry spends the budget on the reply and asks the template to
         # stop thinking. A second empty content falls through to the
@@ -187,7 +193,9 @@ class OpenAICompatBrain:
         text = speakable_text(payload, max_sentences=self.max_sentences)
         if not text:
             raise RuntimeError("model returned no speakable content")
-        return text
+        return polish_reply(
+            text, spoken_user, context=context, notes=notes, receipt=receipt, memories=memories
+        )
 
     def _body(self, system: str, user: str, max_tokens: int, *, disable_thinking: bool) -> dict:
         body = {
@@ -294,6 +302,137 @@ def clean_reply(text: str, max_sentences: int = 3) -> str:
     if max_sentences > 0:
         cleaned = " ".join(_split_sentences(cleaned)[:max_sentences])
     return " ".join(cleaned.split())
+
+
+_GOT_IT = re.compile(r"(?i)^got it\b(?:[,.!?]\s*|\s+)")
+_GENERIC_HEDGE = re.compile(
+    r"(?i)^(?:"
+    r"i (?:do not|don't) have that stored"
+    r"|i (?:do not|don't) have that in (?:my )?memory"
+    r"|i (?:do not|don't) have it stored"
+    r"|je n'ai pas (?:ça|cela)(?: en mémoire)?"
+    r"|je ne (?:sais|connais) pas(?: ça| cela)?"
+    r")\b"
+)
+_GREETING = re.compile(
+    r"(?i)^(hi|hello|hey|hi there|salut|bonjour|bonsoir|coucou)\b"
+)
+
+
+def polish_reply(
+    text: str,
+    user: str,
+    *,
+    context: str = "",
+    notes: list[str] | None = None,
+    receipt: Receipt | None = None,
+    memories: list | None = None,
+) -> str:
+    """Voice-side guard rails after the model has spoken.
+
+    Piper often mishears a leading "Got it" as "Guy it" or "Cut it";
+    "Okay" and "I'll remember that" survive a Piper to Whisper loop.
+    An 8B local model sometimes echoed the user's sentence as the
+    reply. A generic "I do not have that stored" is dropped when the
+    memory block already has the answer.
+    """
+    cleaned = _rewrite_acks(text)
+    has_memory = _has_memory(context, notes, receipt, memories)
+    cleaned = _drop_hedges(cleaned, has_memory=has_memory)
+    cleaned = _drop_echo(cleaned, user, receipt)
+    cleaned = _drop_trailing_okay(cleaned)
+    cleaned = " ".join(cleaned.split())
+    if cleaned:
+        return cleaned
+    return _fallback_ack(user, receipt, memories)
+
+
+def _rewrite_acks(text: str) -> str:
+    return _GOT_IT.sub("Okay. ", text or "", count=1).strip()
+
+
+def _has_memory(context: str, notes, receipt: Receipt | None, memories) -> bool:
+    if notes:
+        return True
+    if memories:
+        return True
+    if receipt is not None and (getattr(receipt, "facts", None) or getattr(receipt, "already", None)):
+        return True
+    block = context or ""
+    return "<memory>" in block or "Earlier values:" in block
+
+
+def _drop_hedges(text: str, *, has_memory: bool) -> str:
+    if not has_memory:
+        return text
+    sentences = _split_sentences(text)
+    kept = [sentence for sentence in sentences if not _GENERIC_HEDGE.search(sentence.strip())]
+    if kept:
+        return " ".join(kept)
+    return ""
+
+
+def _drop_echo(text: str, user: str, receipt: Receipt | None) -> str:
+    sentences = _split_sentences(text)
+    if not sentences:
+        return text
+    if not _is_echo(user, sentences[0]):
+        return text
+    rest = " ".join(sentences[1:]).strip()
+    if rest and not _is_echo(user, rest):
+        return rest
+    return ""
+
+
+def _is_echo(user: str, reply: str) -> bool:
+    left = _words(user)
+    right = _words(reply)
+    if not left or not right:
+        return False
+    if _GREETING.match(user or "") and _GREETING.match(reply or "") and len(left) <= 3:
+        return False
+    if left == right:
+        return True
+    if len(left) >= 4 and right[: len(left)] == left:
+        return True
+    return False
+
+
+def _words(text: str) -> list[str]:
+    return re.findall(r"[a-zà-ÿ0-9']+", (text or "").lower().replace("’", "'"))
+
+
+_TRAILING_OKAY = re.compile(r"(?i)^(okay|ok)\.?$")
+
+
+def _drop_trailing_okay(text: str) -> str:
+    """A leftover closing Okay is not useful once the fact has been said."""
+    sentences = _split_sentences(text)
+    if len(sentences) >= 2 and _TRAILING_OKAY.match(sentences[-1].strip()):
+        return " ".join(sentences[:-1])
+    return text
+
+
+def _fallback_ack(user: str, receipt: Receipt | None, memories=None) -> str:
+    french = _looks_french(user)
+    facts = list(getattr(receipt, "facts", None) or []) or list(memories or [])
+    if facts:
+        summaries = "; ".join(
+            str(getattr(fact, "summary", "") or getattr(fact, "value", "")).strip()
+            for fact in facts
+            if str(getattr(fact, "summary", "") or getattr(fact, "value", "")).strip()
+        )
+        if summaries:
+            lead = "Je vais m'en souvenir. " if french else "I'll remember that. "
+            return f"{lead}{summaries}."
+    return "Je suis là." if french else "Okay."
+
+
+def _looks_french(text: str) -> bool:
+    return re.search(
+        r"(?i)\b(?:je|tu|il|elle|nous|vous|mon|ma|mes|ton|ta|chien|appelle|souvenir|d'accord)\b",
+        text or "",
+    ) is not None
 
 
 def _user_name(memories: list, receipt: Receipt) -> str:
